@@ -1,0 +1,1062 @@
+From 91cdd3b4df456c4772809367ba6e0bb7033eb0ac Mon Sep 17 00:00:00 2001
+From: Brock Whittaker <brock.whittaker@openai.com>
+Date: Tue, 25 Jun 2024 17:34:40 -0400
+Subject: [PATCH] modify + add prepare.ts for loading in larger datasets.
+
+---
+ .gitignore                                 |   4 +-
+ config/eval_gpt2.py                        |   8 -
+ config/eval_gpt2_large.py                  |   8 -
+ config/eval_gpt2_medium.py                 |   8 -
+ config/eval_gpt2_xl.py                     |   8 -
+ config/finetune_shakespeare.py             |  25 ---
+ config/train_gpt2.py                       |  25 ---
+ config/train_shakespeare_char.py           |  37 ----
+ config/train_wiki.py                       |  37 ++++
+ data/shakespeare/prepare.py                |  33 ---
+ data/shakespeare/readme.md                 |   9 -
+ data/shakespeare_char/readme.md            |   9 -
+ data/{shakespeare_char => wiki}/prepare.py |  42 ++--
+ data/wiki/prepare.ts                       |  87 ++++++++
+ sample.py                                  |  81 +++----
+ train.py                                   | 236 ++++++++++++---------
+ 16 files changed, 329 insertions(+), 328 deletions(-)
+ delete mode 100644 config/eval_gpt2.py
+ delete mode 100644 config/eval_gpt2_large.py
+ delete mode 100644 config/eval_gpt2_medium.py
+ delete mode 100644 config/eval_gpt2_xl.py
+ delete mode 100644 config/finetune_shakespeare.py
+ delete mode 100644 config/train_gpt2.py
+ delete mode 100644 config/train_shakespeare_char.py
+ create mode 100644 config/train_wiki.py
+ delete mode 100644 data/shakespeare/prepare.py
+ delete mode 100644 data/shakespeare/readme.md
+ delete mode 100644 data/shakespeare_char/readme.md
+ rename data/{shakespeare_char => wiki}/prepare.py (54%)
+ create mode 100644 data/wiki/prepare.ts
+
+diff --git a/.gitignore b/.gitignore
+index cc343fe..15266fb 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -9,4 +9,6 @@ __pycache__/
+ *.pyc
+ input.txt
+ env/
+-venv/
+\ No newline at end of file
++venv/
++data/wiki/input.large.txt
++data/wiki/meta.json
+diff --git a/config/eval_gpt2.py b/config/eval_gpt2.py
+deleted file mode 100644
+index 53978cb..0000000
+--- a/config/eval_gpt2.py
++++ /dev/null
+@@ -1,8 +0,0 @@
+-# evaluate the base gpt2
+-# n_layer=12, n_head=12, n_embd=768
+-# 124M parameters
+-batch_size = 8
+-eval_iters = 500 # use more iterations to get good estimate
+-eval_only = True
+-wandb_log = False
+-init_from = 'gpt2'
+diff --git a/config/eval_gpt2_large.py b/config/eval_gpt2_large.py
+deleted file mode 100644
+index 4cbeaef..0000000
+--- a/config/eval_gpt2_large.py
++++ /dev/null
+@@ -1,8 +0,0 @@
+-# evaluate the base gpt2
+-# n_layer=36, n_head=20, n_embd=1280
+-# 774M parameters
+-batch_size = 8
+-eval_iters = 500 # use more iterations to get good estimate
+-eval_only = True
+-wandb_log = False
+-init_from = 'gpt2-large'
+diff --git a/config/eval_gpt2_medium.py b/config/eval_gpt2_medium.py
+deleted file mode 100644
+index 9d0db11..0000000
+--- a/config/eval_gpt2_medium.py
++++ /dev/null
+@@ -1,8 +0,0 @@
+-# evaluate the base gpt2
+-# n_layer=24, n_head=16, n_embd=1024
+-# 350M parameters
+-batch_size = 8
+-eval_iters = 500 # use more iterations to get good estimate
+-eval_only = True
+-wandb_log = False
+-init_from = 'gpt2-medium'
+diff --git a/config/eval_gpt2_xl.py b/config/eval_gpt2_xl.py
+deleted file mode 100644
+index 1bae34f..0000000
+--- a/config/eval_gpt2_xl.py
++++ /dev/null
+@@ -1,8 +0,0 @@
+-# evaluate the base gpt2
+-# n_layer=48, n_head=25, n_embd=1600
+-# 1558M parameters
+-batch_size = 8
+-eval_iters = 500 # use more iterations to get good estimate
+-eval_only = True
+-wandb_log = False
+-init_from = 'gpt2-xl'
+diff --git a/config/finetune_shakespeare.py b/config/finetune_shakespeare.py
+deleted file mode 100644
+index 148a4c4..0000000
+--- a/config/finetune_shakespeare.py
++++ /dev/null
+@@ -1,25 +0,0 @@
+-import time
+-
+-out_dir = 'out-shakespeare'
+-eval_interval = 5
+-eval_iters = 40
+-wandb_log = False # feel free to turn on
+-wandb_project = 'shakespeare'
+-wandb_run_name = 'ft-' + str(time.time())
+-
+-dataset = 'shakespeare'
+-init_from = 'gpt2-xl' # this is the largest GPT-2 model
+-
+-# only save checkpoints if the validation loss improves
+-always_save_checkpoint = False
+-
+-# the number of examples per iter:
+-# 1 batch_size * 32 grad_accum * 1024 tokens = 32,768 tokens/iter
+-# shakespeare has 301,966 tokens, so 1 epoch ~= 9.2 iters
+-batch_size = 1
+-gradient_accumulation_steps = 32
+-max_iters = 20
+-
+-# finetune at constant LR
+-learning_rate = 3e-5
+-decay_lr = False
+diff --git a/config/train_gpt2.py b/config/train_gpt2.py
+deleted file mode 100644
+index 8f19273..0000000
+--- a/config/train_gpt2.py
++++ /dev/null
+@@ -1,25 +0,0 @@
+-# config for training GPT-2 (124M) down to very nice loss of ~2.85 on 1 node of 8X A100 40GB
+-# launch as the following (e.g. in a screen session) and wait ~5 days:
+-# $ torchrun --standalone --nproc_per_node=8 train.py config/train_gpt2.py
+-
+-wandb_log = True
+-wandb_project = 'owt'
+-wandb_run_name='gpt2-124M'
+-
+-# these make the total batch size be ~0.5M
+-# 12 batch size * 1024 block size * 5 gradaccum * 8 GPUs = 491,520
+-batch_size = 12
+-block_size = 1024
+-gradient_accumulation_steps = 5 * 8
+-
+-# this makes total number of tokens be 300B
+-max_iters = 600000
+-lr_decay_iters = 600000
+-
+-# eval stuff
+-eval_interval = 1000
+-eval_iters = 200
+-log_interval = 10
+-
+-# weight decay
+-weight_decay = 1e-1
+diff --git a/config/train_shakespeare_char.py b/config/train_shakespeare_char.py
+deleted file mode 100644
+index 41c81df..0000000
+--- a/config/train_shakespeare_char.py
++++ /dev/null
+@@ -1,37 +0,0 @@
+-# train a miniature character-level shakespeare model
+-# good for debugging and playing on macbooks and such
+-
+-out_dir = 'out-shakespeare-char'
+-eval_interval = 250 # keep frequent because we'll overfit
+-eval_iters = 200
+-log_interval = 10 # don't print too too often
+-
+-# we expect to overfit on this small dataset, so only save when val improves
+-always_save_checkpoint = False
+-
+-wandb_log = False # override via command line if you like
+-wandb_project = 'shakespeare-char'
+-wandb_run_name = 'mini-gpt'
+-
+-dataset = 'shakespeare_char'
+-gradient_accumulation_steps = 1
+-batch_size = 64
+-block_size = 256 # context of up to 256 previous characters
+-
+-# baby GPT model :)
+-n_layer = 6
+-n_head = 6
+-n_embd = 384
+-dropout = 0.2
+-
+-learning_rate = 1e-3 # with baby networks can afford to go a bit higher
+-max_iters = 5000
+-lr_decay_iters = 5000 # make equal to max_iters usually
+-min_lr = 1e-4 # learning_rate / 10 usually
+-beta2 = 0.99 # make a bit bigger because number of tokens per iter is small
+-
+-warmup_iters = 100 # not super necessary potentially
+-
+-# on macbook also add
+-# device = 'cpu'  # run on cpu only
+-# compile = False # do not torch compile the model
+diff --git a/config/train_wiki.py b/config/train_wiki.py
+new file mode 100644
+index 0000000..52b7c5e
+--- /dev/null
++++ b/config/train_wiki.py
+@@ -0,0 +1,37 @@
++# train a miniature character-level shakespeare model
++# good for debugging and playing on macbooks and such
++
++out_dir = "out-wiki-2"
++eval_interval = 250  # keep frequent because we'll overfit
++eval_iters = 200
++log_interval = 10  # don't print too too often
++
++# we expect to overfit on this small dataset, so only save when val improves
++always_save_checkpoint = False
++
++wandb_log = False  # override via command line if you like
++wandb_project = "wiki"
++wandb_run_name = "mini-gpt"
++
++dataset = "wiki"
++gradient_accumulation_steps = 1
++batch_size = 64
++block_size = 256  # context of up to 256 previous characters
++
++# baby GPT model :)
++n_layer = 6
++n_head = 6
++n_embd = 384
++dropout = 0.2
++
++learning_rate = 1e-3  # with baby networks can afford to go a bit higher
++max_iters = 5000
++lr_decay_iters = 5000  # make equal to max_iters usually
++min_lr = 1e-4  # learning_rate / 10 usually
++beta2 = 0.99  # make a bit bigger because number of tokens per iter is small
++
++warmup_iters = 100  # not super necessary potentially
++
++# on macbook also add
++# device = 'cpu'  # run on cpu only
++# compile = False # do not torch compile the model
+diff --git a/data/shakespeare/prepare.py b/data/shakespeare/prepare.py
+deleted file mode 100644
+index bda25b1..0000000
+--- a/data/shakespeare/prepare.py
++++ /dev/null
+@@ -1,33 +0,0 @@
+-import os
+-import requests
+-import tiktoken
+-import numpy as np
+-
+-# download the tiny shakespeare dataset
+-input_file_path = os.path.join(os.path.dirname(__file__), 'input.txt')
+-if not os.path.exists(input_file_path):
+-    data_url = 'https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt'
+-    with open(input_file_path, 'w', encoding='utf-8') as f:
+-        f.write(requests.get(data_url).text)
+-
+-with open(input_file_path, 'r', encoding='utf-8') as f:
+-    data = f.read()
+-n = len(data)
+-train_data = data[:int(n*0.9)]
+-val_data = data[int(n*0.9):]
+-
+-# encode with tiktoken gpt2 bpe
+-enc = tiktoken.get_encoding("gpt2")
+-train_ids = enc.encode_ordinary(train_data)
+-val_ids = enc.encode_ordinary(val_data)
+-print(f"train has {len(train_ids):,} tokens")
+-print(f"val has {len(val_ids):,} tokens")
+-
+-# export to bin files
+-train_ids = np.array(train_ids, dtype=np.uint16)
+-val_ids = np.array(val_ids, dtype=np.uint16)
+-train_ids.tofile(os.path.join(os.path.dirname(__file__), 'train.bin'))
+-val_ids.tofile(os.path.join(os.path.dirname(__file__), 'val.bin'))
+-
+-# train.bin has 301,966 tokens
+-# val.bin has 36,059 tokens
+diff --git a/data/shakespeare/readme.md b/data/shakespeare/readme.md
+deleted file mode 100644
+index 1e6c457..0000000
+--- a/data/shakespeare/readme.md
++++ /dev/null
+@@ -1,9 +0,0 @@
+-
+-# tiny shakespeare
+-
+-Tiny shakespeare, of the good old char-rnn fame :)
+-
+-After running `prepare.py`:
+-
+-- train.bin has 301,966 tokens
+-- val.bin has 36,059 tokens
+diff --git a/data/shakespeare_char/readme.md b/data/shakespeare_char/readme.md
+deleted file mode 100644
+index d597b79..0000000
+--- a/data/shakespeare_char/readme.md
++++ /dev/null
+@@ -1,9 +0,0 @@
+-
+-# tiny shakespeare, character-level
+-
+-Tiny shakespeare, of the good old char-rnn fame :) Treated on character-level.
+-
+-After running `prepare.py`:
+-
+-- train.bin has 1,003,854 tokens
+-- val.bin has 111,540 tokens
+diff --git a/data/shakespeare_char/prepare.py b/data/wiki/prepare.py
+similarity index 54%
+rename from data/shakespeare_char/prepare.py
+rename to data/wiki/prepare.py
+index 9fd1621..5fb9f45 100644
+--- a/data/shakespeare_char/prepare.py
++++ b/data/wiki/prepare.py
+@@ -1,43 +1,45 @@
+ """
+-Prepare the Shakespeare dataset for character-level language modeling.
++Prepare the wiki dataset for character-level language modeling.
+ So instead of encoding with GPT-2 BPE tokens, we just map characters to ints.
+ Will save train.bin, val.bin containing the ids, and meta.pkl containing the
+ encoder and decoder and some other related info.
+ """
++
+ import os
+ import pickle
+ import requests
+ import numpy as np
+ 
+ # download the tiny shakespeare dataset
+-input_file_path = os.path.join(os.path.dirname(__file__), 'input.txt')
+-if not os.path.exists(input_file_path):
+-    data_url = 'https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt'
+-    with open(input_file_path, 'w') as f:
+-        f.write(requests.get(data_url).text)
++input_file_path = os.path.join(os.path.dirname(__file__), "input.txt")
+ 
+-with open(input_file_path, 'r') as f:
++with open(input_file_path, "r") as f:
+     data = f.read()
+ print(f"length of dataset in characters: {len(data):,}")
+ 
+ # get all the unique characters that occur in this text
+ chars = sorted(list(set(data)))
+ vocab_size = len(chars)
+-print("all the unique characters:", ''.join(chars))
++print("all the unique characters:", "".join(chars))
+ print(f"vocab size: {vocab_size:,}")
+ 
+ # create a mapping from characters to integers
+-stoi = { ch:i for i,ch in enumerate(chars) }
+-itos = { i:ch for i,ch in enumerate(chars) }
++stoi = {ch: i for i, ch in enumerate(chars)}
++itos = {i: ch for i, ch in enumerate(chars)}
++
++
+ def encode(s):
+-    return [stoi[c] for c in s] # encoder: take a string, output a list of integers
++    return [stoi[c] for c in s]  # encoder: take a string, output a list of integers
++
++
+ def decode(l):
+-    return ''.join([itos[i] for i in l]) # decoder: take a list of integers, output a string
++    return "".join([itos[i] for i in l])  # decoder: take a list of integers, output a string
++
+ 
+ # create the train and test splits
+ n = len(data)
+-train_data = data[:int(n*0.9)]
+-val_data = data[int(n*0.9):]
++train_data = data[: int(n * 0.9)]
++val_data = data[int(n * 0.9) :]
+ 
+ # encode both to integers
+ train_ids = encode(train_data)
+@@ -48,16 +50,16 @@ print(f"val has {len(val_ids):,} tokens")
+ # export to bin files
+ train_ids = np.array(train_ids, dtype=np.uint16)
+ val_ids = np.array(val_ids, dtype=np.uint16)
+-train_ids.tofile(os.path.join(os.path.dirname(__file__), 'train.bin'))
+-val_ids.tofile(os.path.join(os.path.dirname(__file__), 'val.bin'))
++train_ids.tofile(os.path.join(os.path.dirname(__file__), "train.bin"))
++val_ids.tofile(os.path.join(os.path.dirname(__file__), "val.bin"))
+ 
+ # save the meta information as well, to help us encode/decode later
+ meta = {
+-    'vocab_size': vocab_size,
+-    'itos': itos,
+-    'stoi': stoi,
++    "vocab_size": vocab_size,
++    "itos": itos,
++    "stoi": stoi,
+ }
+-with open(os.path.join(os.path.dirname(__file__), 'meta.pkl'), 'wb') as f:
++with open(os.path.join(os.path.dirname(__file__), "meta.pkl"), "wb") as f:
+     pickle.dump(meta, f)
+ 
+ # length of dataset in characters:  1115394
+diff --git a/data/wiki/prepare.ts b/data/wiki/prepare.ts
+new file mode 100644
+index 0000000..23cc39b
+--- /dev/null
++++ b/data/wiki/prepare.ts
+@@ -0,0 +1,87 @@
++const fs = require("fs");
++
++const inputFilePath = "./input.txt";
++
++// read as stream
++const read = fs.createReadStream(inputFilePath, { encoding: "utf8" });
++
++const charToIndex = {};
++
++// get file length in characters
++let fileCharLength = 0;
++read.on("data", (chunk) => {
++  fileCharLength += chunk.length;
++});
++
++fs.writeFileSync("./train.bin", "");
++fs.writeFileSync("./val.bin", "");
++
++read.on("end", () => {
++  console.log(
++    `length of dataset in characters: ${fileCharLength.toLocaleString()}`
++  );
++
++  const onMegaChunk = (chunk: string, charStartIndex: number) => {
++    console.log(
++      `percent done: ${((charStartIndex / fileCharLength) * 100).toFixed(2)}%`
++    );
++    let integers = new Int16Array(chunk.length);
++
++    for (let x = 0; x < chunk.length; x++) {
++      const char = chunk[x];
++      if (!charToIndex[char]) {
++        charToIndex[char] = Object.keys(charToIndex).length;
++      }
++
++      integers[x] = charToIndex[char];
++    }
++    // write out the integers to a file as a binary file
++    const buffer = Buffer.from(integers.buffer);
++
++    if (charStartIndex < 0.9 * fileCharLength) {
++      // appennd to train.bin
++      fs.appendFileSync("./train.bin", buffer);
++    } else {
++      fs.appendFileSync("./val.bin", buffer);
++    }
++  };
++
++  const read = fs.createReadStream(inputFilePath, { encoding: "utf8" });
++
++  let charStartIndex = 0,
++    chunkIndex = 0,
++    currentChunks = new Array(100);
++  read.on("data", (chunk) => {
++    if (++chunkIndex % 100 !== 0) {
++      currentChunks.push(chunk);
++    } else {
++      onMegaChunk(currentChunks.join(""), charStartIndex);
++      currentChunks = [];
++    }
++
++    charStartIndex += chunk.length;
++  });
++
++  if (currentChunks.length) {
++    onMegaChunk(currentChunks.join(""));
++  }
++
++  read.on("end", () => {
++    const charSet = Object.keys(charToIndex).sort();
++    console.log(`all the unique characters: ${charSet.join("")}`);
++    console.log(`number of chars: ${charSet.length}`);
++
++    const indexToChar = {};
++    for (const char in charToIndex) {
++      indexToChar[charToIndex[char]] = char;
++    }
++
++    const meta = {
++      vocab_size: charSet.length,
++      itos: indexToChar,
++      stoi: charToIndex,
++    };
++
++    fs.writeFileSync("./meta.json", JSON.stringify(meta));
++  });
++});
+diff --git a/sample.py b/sample.py
+index d25d6e0..20dc332 100644
+--- a/sample.py
++++ b/sample.py
+@@ -1,71 +1,80 @@
+ """
+ Sample from a trained model
+ """
++
+ import os
+-import pickle
++import json
+ from contextlib import nullcontext
+ import torch
+ import tiktoken
+ from model import GPTConfig, GPT
+ 
+ # -----------------------------------------------------------------------------
+-init_from = 'resume' # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
+-out_dir = 'out' # ignored if init_from is not 'resume'
+-start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
+-num_samples = 10 # number of samples to draw
+-max_new_tokens = 500 # number of tokens generated in each sample
+-temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
+-top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
++init_from = "resume"  # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
++out_dir = "out"  # ignored if init_from is not 'resume'
++start = "\n"  # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
++num_samples = 10  # number of samples to draw
++max_new_tokens = 500  # number of tokens generated in each sample
++temperature = 0.8  # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
++top_k = 200  # retain only the top_k most likely tokens, clamp others to have 0 probability
+ seed = 1337
+-device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
+-dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
+-compile = False # use PyTorch 2.0 to compile the model to be faster
+-exec(open('configurator.py').read()) # overrides from command line or config file
++device = "cuda"  # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
++dtype = (
++    "bfloat16" if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else "float16"
++)  # 'float32' or 'bfloat16' or 'float16'
++compile = False  # use PyTorch 2.0 to compile the model to be faster
++exec(open("configurator.py").read())  # overrides from command line or config file
+ # -----------------------------------------------------------------------------
+ 
+ torch.manual_seed(seed)
+ torch.cuda.manual_seed(seed)
+-torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
+-torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
+-device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
+-ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
+-ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
++torch.backends.cuda.matmul.allow_tf32 = True  # allow tf32 on matmul
++torch.backends.cudnn.allow_tf32 = True  # allow tf32 on cudnn
++device_type = "cuda" if "cuda" in device else "cpu"  # for later use in torch.autocast
++ptdtype = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16}[dtype]
++ctx = (
++    nullcontext()
++    if device_type == "cpu"
++    else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
++)
+ 
+ # model
+-if init_from == 'resume':
++if init_from == "resume":
+     # init from a model saved in a specific directory
+-    ckpt_path = os.path.join(out_dir, 'ckpt.pt')
++    ckpt_path = os.path.join(out_dir, "ckpt.pt")
+     checkpoint = torch.load(ckpt_path, map_location=device)
+-    gptconf = GPTConfig(**checkpoint['model_args'])
++    gptconf = GPTConfig(**checkpoint["model_args"])
+     model = GPT(gptconf)
+-    state_dict = checkpoint['model']
+-    unwanted_prefix = '_orig_mod.'
+-    for k,v in list(state_dict.items()):
++    state_dict = checkpoint["model"]
++    unwanted_prefix = "_orig_mod."
++    for k, v in list(state_dict.items()):
+         if k.startswith(unwanted_prefix):
+-            state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
++            state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
+     model.load_state_dict(state_dict)
+-elif init_from.startswith('gpt2'):
++elif init_from.startswith("gpt2"):
+     # init from a given GPT-2 model
+     model = GPT.from_pretrained(init_from, dict(dropout=0.0))
+ 
+ model.eval()
+ model.to(device)
+ if compile:
+-    model = torch.compile(model) # requires PyTorch 2.0 (optional)
++    model = torch.compile(model)  # requires PyTorch 2.0 (optional)
+ 
+ # look for the meta pickle in case it is available in the dataset folder
+ load_meta = False
+-if init_from == 'resume' and 'config' in checkpoint and 'dataset' in checkpoint['config']: # older checkpoints might not have these...
+-    meta_path = os.path.join('data', checkpoint['config']['dataset'], 'meta.pkl')
++if (
++    init_from == "resume" and "config" in checkpoint and "dataset" in checkpoint["config"]
++):  # older checkpoints might not have these...
++    meta_path = os.path.join("data", checkpoint["config"]["dataset"], "meta.json")
+     load_meta = os.path.exists(meta_path)
+ if load_meta:
+     print(f"Loading meta from {meta_path}...")
+-    with open(meta_path, 'rb') as f:
+-        meta = pickle.load(f)
++    with open(meta_path, "r") as f:
++        meta = json.load(f)
+     # TODO want to make this more general to arbitrary encoder/decoder schemes
+-    stoi, itos = meta['stoi'], meta['itos']
++    stoi, itos = meta["stoi"], meta["itos"]
+     encode = lambda s: [stoi[c] for c in s]
+-    decode = lambda l: ''.join([itos[i] for i in l])
++    decode = lambda l: "".join([itos[str(i)] for i in l])
+ else:
+     # ok let's assume gpt-2 encodings by default
+     print("No meta.pkl found, assuming GPT-2 encodings...")
+@@ -74,11 +83,11 @@ else:
+     decode = lambda l: enc.decode(l)
+ 
+ # encode the beginning of the prompt
+-if start.startswith('FILE:'):
+-    with open(start[5:], 'r', encoding='utf-8') as f:
++if start.startswith("FILE:"):
++    with open(start[5:], "r", encoding="utf-8") as f:
+         start = f.read()
+ start_ids = encode(start)
+-x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
++x = torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...]
+ 
+ # run generation
+ with torch.no_grad():
+@@ -86,4 +95,4 @@ with torch.no_grad():
+         for k in range(num_samples):
+             y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
+             print(decode(y[0].tolist()))
+-            print('---------------')
++            print("---------------")
+diff --git a/train.py b/train.py
+index 951bda9..b26767c 100644
+--- a/train.py
++++ b/train.py
+@@ -19,7 +19,7 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123
+ import os
+ import time
+ import math
+-import pickle
++import json
+ from contextlib import nullcontext
+ 
+ import numpy as np
+@@ -32,63 +32,69 @@ from model import GPTConfig, GPT
+ # -----------------------------------------------------------------------------
+ # default config values designed to train a gpt2 (124M) on OpenWebText
+ # I/O
+-out_dir = 'out'
++out_dir = "out"
+ eval_interval = 2000
+ log_interval = 1
+ eval_iters = 200
+-eval_only = False # if True, script exits right after the first eval
+-always_save_checkpoint = True # if True, always save a checkpoint after each eval
+-init_from = 'scratch' # 'scratch' or 'resume' or 'gpt2*'
++eval_only = False  # if True, script exits right after the first eval
++always_save_checkpoint = True  # if True, always save a checkpoint after each eval
++init_from = "scratch"  # 'scratch' or 'resume' or 'gpt2*'
+ # wandb logging
+-wandb_log = False # disabled by default
+-wandb_project = 'owt'
+-wandb_run_name = 'gpt2' # 'run' + str(time.time())
++wandb_log = False  # disabled by default
++wandb_project = "owt"
++wandb_run_name = "gpt2"  # 'run' + str(time.time())
+ # data
+-dataset = 'openwebtext'
+-gradient_accumulation_steps = 5 * 8 # used to simulate larger batch sizes
+-batch_size = 12 # if gradient_accumulation_steps > 1, this is the micro-batch size
++dataset = "openwebtext"
++gradient_accumulation_steps = 5 * 8  # used to simulate larger batch sizes
++batch_size = 12  # if gradient_accumulation_steps > 1, this is the micro-batch size
+ block_size = 1024
+ # model
+ n_layer = 12
+ n_head = 12
+ n_embd = 768
+-dropout = 0.0 # for pretraining 0 is good, for finetuning try 0.1+
+-bias = False # do we use bias inside LayerNorm and Linear layers?
++dropout = 0.0  # for pretraining 0 is good, for finetuning try 0.1+
++bias = False  # do we use bias inside LayerNorm and Linear layers?
+ # adamw optimizer
+-learning_rate = 6e-4 # max learning rate
+-max_iters = 600000 # total number of training iterations
++learning_rate = 6e-4  # max learning rate
++max_iters = 600000  # total number of training iterations
+ weight_decay = 1e-1
+ beta1 = 0.9
+ beta2 = 0.95
+-grad_clip = 1.0 # clip gradients at this value, or disable if == 0.0
++grad_clip = 1.0  # clip gradients at this value, or disable if == 0.0
+ # learning rate decay settings
+-decay_lr = True # whether to decay the learning rate
+-warmup_iters = 2000 # how many steps to warm up for
+-lr_decay_iters = 600000 # should be ~= max_iters per Chinchilla
+-min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
++decay_lr = True  # whether to decay the learning rate
++warmup_iters = 2000  # how many steps to warm up for
++lr_decay_iters = 600000  # should be ~= max_iters per Chinchilla
++min_lr = 6e-5  # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
+ # DDP settings
+-backend = 'nccl' # 'nccl', 'gloo', etc.
++backend = "nccl"  # 'nccl', 'gloo', etc.
+ # system
+-device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
+-dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
+-compile = True # use PyTorch 2.0 to compile the model to be faster
++device = "cuda"  # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
++dtype = (
++    "bfloat16" if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else "float16"
++)  # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
++compile = True  # use PyTorch 2.0 to compile the model to be faster
+ # -----------------------------------------------------------------------------
+-config_keys = [k for k,v in globals().items() if not k.startswith('_') and isinstance(v, (int, float, bool, str))]
+-exec(open('configurator.py').read()) # overrides from command line or config file
+-config = {k: globals()[k] for k in config_keys} # will be useful for logging
++config_keys = [
++    k
++    for k, v in globals().items()
++    if not k.startswith("_") and isinstance(v, (int, float, bool, str))
++]
++exec(open("configurator.py").read())  # overrides from command line or config file
++config = {k: globals()[k] for k in config_keys}  # will be useful for logging
+ # -----------------------------------------------------------------------------
+ 
+ # various inits, derived attributes, I/O setup
+-ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
++ddp = int(os.environ.get("RANK", -1)) != -1  # is this a ddp run?
+ if ddp:
+     init_process_group(backend=backend)
+-    ddp_rank = int(os.environ['RANK'])
+-    ddp_local_rank = int(os.environ['LOCAL_RANK'])
+-    ddp_world_size = int(os.environ['WORLD_SIZE'])
+-    device = f'cuda:{ddp_local_rank}'
++    ddp_rank = int(os.environ["RANK"])
++    ddp_local_rank = int(os.environ["LOCAL_RANK"])
++    ddp_world_size = int(os.environ["WORLD_SIZE"])
++    device = f"cuda:{ddp_local_rank}"
+     torch.cuda.set_device(device)
+-    master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
+-    seed_offset = ddp_rank # each process gets a different seed
++    master_process = ddp_rank == 0  # this process will do logging, checkpointing etc.
++    seed_offset = ddp_rank  # each process gets a different seed
+     # world_size number of processes will be training simultaneously, so we can scale
+     # down the desired gradient accumulation iterations per process proportionally
+     assert gradient_accumulation_steps % ddp_world_size == 0
+@@ -104,119 +110,138 @@ print(f"tokens per iteration will be: {tokens_per_iter:,}")
+ if master_process:
+     os.makedirs(out_dir, exist_ok=True)
+ torch.manual_seed(1337 + seed_offset)
+-torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
+-torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
+-device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
++torch.backends.cuda.matmul.allow_tf32 = True  # allow tf32 on matmul
++torch.backends.cudnn.allow_tf32 = True  # allow tf32 on cudnn
++device_type = "cuda" if "cuda" in device else "cpu"  # for later use in torch.autocast
+ # note: float16 data type will automatically use a GradScaler
+-ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
+-ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
++ptdtype = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16}[dtype]
++ctx = (
++    nullcontext()
++    if device_type == "cpu"
++    else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
++)
+ 
+ # poor man's data loader
+-data_dir = os.path.join('data', dataset)
++data_dir = os.path.join("data", dataset)
++
++
+ def get_batch(split):
+     # We recreate np.memmap every batch to avoid a memory leak, as per
+     # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
+-    if split == 'train':
+-        data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
++    if split == "train":
++        data = np.memmap(os.path.join(data_dir, "train.bin"), dtype=np.uint16, mode="r")
+     else:
+-        data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
++        data = np.memmap(os.path.join(data_dir, "val.bin"), dtype=np.uint16, mode="r")
+     ix = torch.randint(len(data) - block_size, (batch_size,))
+-    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
+-    y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+-    if device_type == 'cuda':
++    x = torch.stack([torch.from_numpy((data[i : i + block_size]).astype(np.int64)) for i in ix])
++    y = torch.stack(
++        [torch.from_numpy((data[i + 1 : i + 1 + block_size]).astype(np.int64)) for i in ix]
++    )
++    if device_type == "cuda":
+         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
+-        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
++        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(
++            device, non_blocking=True
++        )
+     else:
+         x, y = x.to(device), y.to(device)
+     return x, y
+ 
++
+ # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
+ iter_num = 0
+ best_val_loss = 1e9
+ 
+ # attempt to derive vocab_size from the dataset
+-meta_path = os.path.join(data_dir, 'meta.pkl')
++meta_path = os.path.join(data_dir, "meta.json")
+ meta_vocab_size = None
+ if os.path.exists(meta_path):
+-    with open(meta_path, 'rb') as f:
+-        meta = pickle.load(f)
+-    meta_vocab_size = meta['vocab_size']
++    with open(meta_path, "rb") as f:
++        meta = json.load(f)
++    meta_vocab_size = meta["vocab_size"]
+     print(f"found vocab_size = {meta_vocab_size} (inside {meta_path})")
+ 
+ # model init
+-model_args = dict(n_layer=n_layer, n_head=n_head, n_embd=n_embd, block_size=block_size,
+-                  bias=bias, vocab_size=None, dropout=dropout) # start with model_args from command line
+-if init_from == 'scratch':
++model_args = dict(
++    n_layer=n_layer,
++    n_head=n_head,
++    n_embd=n_embd,
++    block_size=block_size,
++    bias=bias,
++    vocab_size=None,
++    dropout=dropout,
++)  # start with model_args from command line
++if init_from == "scratch":
+     # init a new model from scratch
+     print("Initializing a new model from scratch")
+     # determine the vocab size we'll use for from-scratch training
+     if meta_vocab_size is None:
+         print("defaulting to vocab_size of GPT-2 to 50304 (50257 rounded up for efficiency)")
+-    model_args['vocab_size'] = meta_vocab_size if meta_vocab_size is not None else 50304
++    model_args["vocab_size"] = meta_vocab_size if meta_vocab_size is not None else 50304
+     gptconf = GPTConfig(**model_args)
+     model = GPT(gptconf)
+-elif init_from == 'resume':
++elif init_from == "resume":
+     print(f"Resuming training from {out_dir}")
+     # resume training from a checkpoint.
+-    ckpt_path = os.path.join(out_dir, 'ckpt.pt')
++    ckpt_path = os.path.join(out_dir, "ckpt.pt")
+     checkpoint = torch.load(ckpt_path, map_location=device)
+-    checkpoint_model_args = checkpoint['model_args']
++    checkpoint_model_args = checkpoint["model_args"]
+     # force these config attributes to be equal otherwise we can't even resume training
+     # the rest of the attributes (e.g. dropout) can stay as desired from command line
+-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
++    for k in ["n_layer", "n_head", "n_embd", "block_size", "bias", "vocab_size"]:
+         model_args[k] = checkpoint_model_args[k]
+     # create the model
+     gptconf = GPTConfig(**model_args)
+     model = GPT(gptconf)
+-    state_dict = checkpoint['model']
++    state_dict = checkpoint["model"]
+     # fix the keys of the state dictionary :(
+     # honestly no idea how checkpoints sometimes get this prefix, have to debug more
+-    unwanted_prefix = '_orig_mod.'
+-    for k,v in list(state_dict.items()):
++    unwanted_prefix = "_orig_mod."
++    for k, v in list(state_dict.items()):
+         if k.startswith(unwanted_prefix):
+-            state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
++            state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
+     model.load_state_dict(state_dict)
+-    iter_num = checkpoint['iter_num']
+-    best_val_loss = checkpoint['best_val_loss']
+-elif init_from.startswith('gpt2'):
++    iter_num = checkpoint["iter_num"]
++    best_val_loss = checkpoint["best_val_loss"]
++elif init_from.startswith("gpt2"):
+     print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
+     # initialize from OpenAI GPT-2 weights
+     override_args = dict(dropout=dropout)
+     model = GPT.from_pretrained(init_from, override_args)
+     # read off the created config params, so we can store them into checkpoint correctly
+-    for k in ['n_layer', 'n_head', 'n_embd', 'block_size', 'bias', 'vocab_size']:
++    for k in ["n_layer", "n_head", "n_embd", "block_size", "bias", "vocab_size"]:
+         model_args[k] = getattr(model.config, k)
+ # crop down the model block size if desired, using model surgery
+ if block_size < model.config.block_size:
+     model.crop_block_size(block_size)
+-    model_args['block_size'] = block_size # so that the checkpoint will have the right value
++    model_args["block_size"] = block_size  # so that the checkpoint will have the right value
+ model.to(device)
+ 
+ # initialize a GradScaler. If enabled=False scaler is a no-op
+-scaler = torch.cuda.amp.GradScaler(enabled=(dtype == 'float16'))
++scaler = torch.cuda.amp.GradScaler(enabled=(dtype == "float16"))
+ 
+ # optimizer
+ optimizer = model.configure_optimizers(weight_decay, learning_rate, (beta1, beta2), device_type)
+-if init_from == 'resume':
+-    optimizer.load_state_dict(checkpoint['optimizer'])
+-checkpoint = None # free up memory
++if init_from == "resume":
++    optimizer.load_state_dict(checkpoint["optimizer"])
++checkpoint = None  # free up memory
+ 
+ # compile the model
+ if compile:
+     print("compiling the model... (takes a ~minute)")
+     unoptimized_model = model
+-    model = torch.compile(model) # requires PyTorch 2.0
++    model = torch.compile(model)  # requires PyTorch 2.0
+ 
+ # wrap model into DDP container
+ if ddp:
+     model = DDP(model, device_ids=[ddp_local_rank])
+ 
++
+ # helps estimate an arbitrarily accurate loss over either split using many batches
+ @torch.no_grad()
+ def estimate_loss():
+     out = {}
+     model.eval()
+-    for split in ['train', 'val']:
++    for split in ["train", "val"]:
+         losses = torch.zeros(eval_iters)
+         for k in range(eval_iters):
+             X, Y = get_batch(split)
+@@ -227,6 +252,7 @@ def estimate_loss():
+     model.train()
+     return out
+ 
++
+ # learning rate decay scheduler (cosine with warmup)
+ def get_lr(it):
+     # 1) linear warmup for warmup_iters steps
+@@ -238,52 +264,56 @@ def get_lr(it):
+     # 3) in between, use cosine decay down to min learning rate
+     decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
+     assert 0 <= decay_ratio <= 1
+-    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # coeff ranges 0..1
++    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff ranges 0..1
+     return min_lr + coeff * (learning_rate - min_lr)
+ 
++
+ # logging
+ if wandb_log and master_process:
+     import wandb
++
+     wandb.init(project=wandb_project, name=wandb_run_name, config=config)
+ 
+ # training loop
+-X, Y = get_batch('train') # fetch the very first batch
++X, Y = get_batch("train")  # fetch the very first batch
+ t0 = time.time()
+-local_iter_num = 0 # number of iterations in the lifetime of this process
+-raw_model = model.module if ddp else model # unwrap DDP container if needed
++local_iter_num = 0  # number of iterations in the lifetime of this process
++raw_model = model.module if ddp else model  # unwrap DDP container if needed
+ running_mfu = -1.0
+ while True:
+ 
+     # determine and set the learning rate for this iteration
+     lr = get_lr(iter_num) if decay_lr else learning_rate
+     for param_group in optimizer.param_groups:
+-        param_group['lr'] = lr
++        param_group["lr"] = lr
+ 
+     # evaluate the loss on train/val sets and write checkpoints
+     if iter_num % eval_interval == 0 and master_process:
+         losses = estimate_loss()
+         print(f"step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+         if wandb_log:
+-            wandb.log({
+-                "iter": iter_num,
+-                "train/loss": losses['train'],
+-                "val/loss": losses['val'],
+-                "lr": lr,
+-                "mfu": running_mfu*100, # convert to percentage
+-            })
+-        if losses['val'] < best_val_loss or always_save_checkpoint:
+-            best_val_loss = losses['val']
++            wandb.log(
++                {
++                    "iter": iter_num,
++                    "train/loss": losses["train"],
++                    "val/loss": losses["val"],
++                    "lr": lr,
++                    "mfu": running_mfu * 100,  # convert to percentage
++                }
++            )
++        if losses["val"] < best_val_loss or always_save_checkpoint:
++            best_val_loss = losses["val"]
+             if iter_num > 0:
+                 checkpoint = {
+-                    'model': raw_model.state_dict(),
+-                    'optimizer': optimizer.state_dict(),
+-                    'model_args': model_args,
+-                    'iter_num': iter_num,
+-                    'best_val_loss': best_val_loss,
+-                    'config': config,
++                    "model": raw_model.state_dict(),
++                    "optimizer": optimizer.state_dict(),
++                    "model_args": model_args,
++                    "iter_num": iter_num,
++                    "best_val_loss": best_val_loss,
++                    "config": config,
+                 }
+                 print(f"saving checkpoint to {out_dir}")
+-                torch.save(checkpoint, os.path.join(out_dir, 'ckpt.pt'))
++                torch.save(checkpoint, os.path.join(out_dir, "ckpt.pt"))
+     if iter_num == 0 and eval_only:
+         break
+ 
+@@ -295,12 +325,14 @@ while True:
+             # the official way to do this is with model.no_sync() context manager, but
+             # I really dislike that this bloats the code and forces us to repeat code
+             # looking at the source of that context manager, it just toggles this variable
+-            model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
++            model.require_backward_grad_sync = micro_step == gradient_accumulation_steps - 1
+         with ctx:
+             logits, loss = model(X, Y)
+-            loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
++            loss = (
++                loss / gradient_accumulation_steps
++            )  # scale the loss to account for gradient accumulation
+         # immediately async prefetch next batch while model is doing the forward pass on the GPU
+-        X, Y = get_batch('train')
++        X, Y = get_batch("train")
+         # backward pass, with gradient scaling if training in fp16
+         scaler.scale(loss).backward()
+     # clip the gradient
+@@ -321,10 +353,12 @@ while True:
+         # get loss as float. note: this is a CPU-GPU sync point
+         # scale up to undo the division above, approximating the true total loss (exact would have been a sum)
+         lossf = loss.item() * gradient_accumulation_steps
+-        if local_iter_num >= 5: # let the training loop settle a bit
++        if local_iter_num >= 5:  # let the training loop settle a bit
+             mfu = raw_model.estimate_mfu(batch_size * gradient_accumulation_steps, dt)
+-            running_mfu = mfu if running_mfu == -1.0 else 0.9*running_mfu + 0.1*mfu
+-        print(f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%")
++            running_mfu = mfu if running_mfu == -1.0 else 0.9 * running_mfu + 0.1 * mfu
++        print(
++            f"iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms, mfu {running_mfu*100:.2f}%"
++        )
+     iter_num += 1
+     local_iter_num += 1
+ 
+-- 
+2.39.3 (Apple Git-146)
+

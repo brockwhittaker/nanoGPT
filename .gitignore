@@ -10,3 +10,5 @@ __pycache__/
 input.txt
 env/
 venv/
+data/wiki/input.large.txt
+data/wiki/meta.json
