@@ -32,8 +32,8 @@ read.on("end", () => {
       const char = chunk[x];
       if (!charToIndex[char]) {
         charToIndex[char] = charsIndexedCounter++;
-        integers[x] = charToIndex[char];
       }
+      integers[x] = charToIndex[char];
     }
     // write out the integers to a file as a binary file
     const buffer = Buffer.from(integers.buffer);
