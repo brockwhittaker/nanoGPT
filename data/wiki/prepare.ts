@@ -16,6 +16,7 @@ read.on("data", (chunk) => {
 fs.writeFileSync("./train.bin", "");
 fs.writeFileSync("./val.bin", "");
 
+let charsIndexedCounter = 0;
 read.on("end", () => {
   console.log(
     `length of dataset in characters: ${fileCharLength.toLocaleString()}`
@@ -30,10 +31,9 @@ read.on("end", () => {
     for (let x = 0; x < chunk.length; x++) {
       const char = chunk[x];
       if (!charToIndex[char]) {
-        charToIndex[char] = Object.keys(charToIndex).length;
+        charToIndex[char] = charsIndexedCounter++;
+        integers[x] = charToIndex[char];
       }
-
-      integers[x] = charToIndex[char];
     }
     // write out the integers to a file as a binary file
     const buffer = Buffer.from(integers.buffer);
@@ -50,20 +50,22 @@ read.on("end", () => {
 
   let charStartIndex = 0,
     chunkIndex = 0,
-    currentChunks = new Array(100);
+    currentChunks = new Array(1000);
   read.on("data", (chunk) => {
-    if (++chunkIndex % 100 !== 0) {
-      currentChunks.push(chunk);
+    if (chunkIndex === 0 || chunkIndex % 1000 !== 0) {
+      currentChunks[chunkIndex % 1000] = chunk;
     } else {
       onMegaChunk(currentChunks.join(""), charStartIndex);
-      currentChunks = [];
+      currentChunks = new Array(1000);
     }
+
+    chunkIndex++;
 
     charStartIndex += chunk.length;
   });
 
   if (currentChunks.length) {
-    onMegaChunk(currentChunks.join(""));
+    onMegaChunk(currentChunks.join(""), charStartIndex);
   }
 
   read.on("end", () => {
@@ -83,5 +85,23 @@ read.on("end", () => {
     };
 
     fs.writeFileSync("./meta.json", JSON.stringify(meta));
+
+    // assert that every key in stoi is different
+    const set = new Set();
+    for (const key in charToIndex) {
+      if (set.has(charToIndex[key])) {
+        throw new Error(`duplicate key: ${key}`, charToIndex[key]);
+      }
+      set.add(charToIndex[key]);
+    }
+
+    // assert that every key in itos is different
+    const set2 = new Set();
+    for (const key in indexToChar) {
+      if (set2.has(indexToChar[key])) {
+        throw new Error(`duplicate key: ${key}`, indexToChar[key]);
+      }
+      set2.add(indexToChar[key]);
+    }
   });
 });
